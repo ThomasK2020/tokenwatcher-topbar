@@ -1,0 +1,17 @@
+{
+  "uuid": "tokenwatcher@thomas.local",
+  "name": "TokenWatcher",
+  "description": "Real-time Open WebUI Token & AMD GPU Monitor in GNOME Top Bar",
+  "shell-version": [
+    "45",
+    "46",
+    "47",
+    "48",
+    "49",
+    "50",
+    "50.1",
+    "51"
+  ],
+  "url": "https://localhost",
+  "version": 1
+}

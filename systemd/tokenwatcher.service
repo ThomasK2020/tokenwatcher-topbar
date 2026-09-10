@@ -1,0 +1,12 @@
+[Unit]
+Description=TokenWatcher Daemon for Open WebUI & AMD GPU
+After=network.target open-webui.service
+
+[Service]
+Type=simple
+ExecStart=/home/thomas/.local/bin/tokenwatcher-daemon
+Restart=on-failure
+RestartSec=3s
+
+[Install]
+WantedBy=default.target

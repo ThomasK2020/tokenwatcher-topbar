@@ -1,0 +1,466 @@
+#!/usr/bin/env python3
+import os
+import sys
+import json
+import time
+import glob
+import sqlite3
+import urllib.request
+import urllib.error
+import gzip
+
+CONFIG_PATH = os.path.expanduser("~/.config/tokenwatcher/config.json")
+STATE_PATH = "/tmp/tokenwatcher_state.json"
+HERMES_DB_PATH = os.path.expanduser("~/.hermes/state.db")
+OPENCODE_DB_PATH = os.path.expanduser("~/.local/share/opencode/opencode.db")
+
+IGNORED_MODELS = {"localaicheckstatus", "test", "dummy", "unknown"}
+
+DEFAULT_CONFIG = {
+    "poll_interval": 1.0,
+    "lemonade_url": "http://127.0.0.1:13305",
+    "gpu_card": "card1",
+    "openwebui_db_path": os.path.expanduser("~/.local/share/open-webui/webui.db")
+}
+
+
+def load_config():
+    if os.path.exists(CONFIG_PATH):
+        try:
+            with open(CONFIG_PATH, "r") as f:
+                cfg = json.load(f)
+                res = DEFAULT_CONFIG.copy()
+                res.update(cfg)
+                return res
+        except Exception:
+            pass
+    return DEFAULT_CONFIG.copy()
+
+
+def clean_model_name(raw_name):
+    if not raw_name:
+        return "Standby"
+    lower = str(raw_name).lower()
+    if "gemini-3.7" in lower or "gemini 3.7" in lower:
+        return "Gemini 3.7 Flash"
+    if "gemini-3.6" in lower or "gemini 3.6" in lower:
+        return "Gemini 3.6 Flash"
+    if "gemini-2.5" in lower or "gemini 2.5" in lower:
+        return "Gemini 2.5 Flash"
+    if "qwen3-coder-30b" in lower or "qwen3-coder" in lower:
+        return "Qwen3-Coder-30B"
+    if "gemma-4-12b" in lower or "gemma 4 12b" in lower:
+        return "Gemma-4-12B"
+    if "gemma-4-31b" in lower or "gemma 4 31b" in lower:
+        return "Gemma-4-31B"
+    if "claude-3-7-sonnet" in lower:
+        return "Claude 3.7 Sonnet"
+    if "claude-3-5-sonnet" in lower:
+        return "Claude 3.5 Sonnet"
+    if "gpt-4o" in lower:
+        return "GPT-4o"
+    name = str(raw_name).strip()
+    if "/" in name:
+        name = name.split("/")[-1]
+    name = name.replace(".gguf", "").replace(".GGUF", "")
+    for ext in [":latest", "-it-GGUF", "-Instruct-GGUF", "-it", "-Instruct", "-A3B"]:
+        if name.endswith(ext):
+            name = name[:-len(ext)]
+    return name
+
+
+def get_lemonade_loaded_model(base_url="http://127.0.0.1:13305"):
+    try:
+        req = urllib.request.Request(f"{base_url}/api/v1/health", headers={"Accept-Encoding": "gzip"})
+        with urllib.request.urlopen(req, timeout=1.0) as resp:
+            data = resp.read()
+            if resp.info().get("Content-Encoding") == "gzip":
+                data = gzip.decompress(data)
+            js = json.loads(data.decode("utf-8"))
+            if js.get("status") == "ok":
+                loaded = js.get("loaded_models", [])
+                if loaded and isinstance(loaded, list) and len(loaded) > 0:
+                    first = loaded[0]
+                    name = first.get("name") if isinstance(first, dict) else str(first)
+                    if name and name.lower() not in IGNORED_MODELS:
+                        return name
+                m_loaded = js.get("model_loaded")
+                if m_loaded and str(m_loaded).lower() not in IGNORED_MODELS:
+                    return str(m_loaded)
+    except Exception:
+        pass
+    return None
+
+
+def get_best_webui_db_path():
+    patterns = [
+        os.path.expanduser("~/.local/share/open-webui/webui.db"),
+        os.path.expanduser("~/.open-webui/webui.db"),
+        os.path.expanduser("~/.cache/uv/archive-v0/*/lib/python3.11/site-packages/open_webui/data/webui.db")
+    ]
+    for pat in patterns:
+        matches = glob.glob(pat)
+        if matches:
+            matches.sort(key=os.path.getmtime, reverse=True)
+            return matches[0]
+    return patterns[0]
+
+
+def fetch_metrics_hermes():
+    if not os.path.exists(HERMES_DB_PATH):
+        return None
+
+    try:
+        conn = sqlite3.connect(f"file:{HERMES_DB_PATH}?mode=ro", uri=True)
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT id, title, model, last_activity_at, started_at, input_tokens, output_tokens, reasoning_tokens, tool_call_count, cwd
+            FROM sessions
+            WHERE archived = 0 AND hidden = 0
+            ORDER BY COALESCE(last_activity_at, started_at) DESC
+            LIMIT 1;
+        """)
+        row = cur.fetchone()
+        conn.close()
+
+        if not row:
+            return None
+
+        session_id, title, model, last_activity, started_at, in_tok, out_tok, reason_tok, tool_count, cwd = row
+        
+        model_name = clean_model_name(model or "Hermes")
+        prompt_tokens = in_tok or 0
+        completion_tokens = out_tok or 0
+        reasoning_tokens = reason_tok or 0
+        total_tokens = prompt_tokens + completion_tokens + reasoning_tokens
+        activity_ts = float(last_activity or started_at or time.time())
+
+        return {
+            "source": "hermes",
+            "source_label": "Hermes Agent",
+            "status": "online",
+            "method": "sqlite",
+            "session_id": session_id,
+            "chat_title": title or "Hermes Task",
+            "directory": cwd or "/home/thomas",
+            "agent_mode": "agent",
+            "model": model_name,
+            "raw_model": model,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "reasoning_tokens": reasoning_tokens,
+            "total_tokens": total_tokens,
+            "tool_calls": tool_count or 0,
+            "tokens_per_sec": 0.0,
+            "prompt_per_sec": 0.0,
+            "updated_at": activity_ts
+        }
+    except Exception as e:
+        print(f"[TokenWatcher] Hermes fetch error: {e}", file=sys.stderr)
+        return None
+
+
+def fetch_metrics_openwebui(config):
+    db_path = get_best_webui_db_path()
+    if not os.path.exists(db_path):
+        return None
+
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        cur = conn.cursor()
+        cur.execute("SELECT id, title, chat, updated_at FROM chat ORDER BY updated_at DESC LIMIT 5;")
+        rows = cur.fetchall()
+        conn.close()
+
+        if not rows:
+            return None
+
+        for row in rows:
+            chat_id, title, chat_json_str, updated_at = row
+            try:
+                chat_data = json.loads(chat_json_str) if chat_json_str else {}
+            except Exception:
+                chat_data = {}
+
+            history = chat_data.get("history", {})
+            messages = history.get("messages", {})
+
+            last_msg = None
+            if messages:
+                sorted_msgs = sorted(
+                    messages.values(),
+                    key=lambda m: m.get("timestamp", m.get("created_at", 0)),
+                    reverse=True
+                )
+                if sorted_msgs:
+                    last_msg = sorted_msgs[0]
+
+            model = None
+            if last_msg:
+                model = last_msg.get("selectedModelId") or last_msg.get("model")
+            if not model:
+                models_list = chat_data.get("models", [])
+                if models_list and isinstance(models_list, list):
+                    model = models_list[0]
+
+            # Filter out test/dummy model IDs
+            if model and str(model).lower() in IGNORED_MODELS:
+                continue
+
+            cleaned_model = clean_model_name(model or "Gemma-4-12B")
+
+            total_prompt_tokens = 0
+            total_completion_tokens = 0
+            latest_eval_count = 0
+            latest_eval_duration = 0
+            latest_prompt_count = 0
+            latest_prompt_duration = 0
+
+            for m in messages.values():
+                info = m.get("info", {})
+                if not info:
+                    continue
+                p_tok = info.get("prompt_eval_count", 0) or info.get("prompt_tokens", 0)
+                c_tok = info.get("eval_count", 0) or info.get("completion_tokens", 0)
+                total_prompt_tokens += p_tok
+                total_completion_tokens += c_tok
+
+            if last_msg:
+                info = last_msg.get("info", {})
+                if info:
+                    latest_eval_count = info.get("eval_count", 0) or info.get("completion_tokens", 0)
+                    latest_eval_duration = info.get("eval_duration", 0)
+                    latest_prompt_count = info.get("prompt_eval_count", 0) or info.get("prompt_tokens", 0)
+                    latest_prompt_duration = info.get("prompt_eval_duration", 0)
+
+            tps = 0.0
+            if latest_eval_duration > 0:
+                tps = round(latest_eval_count / (latest_eval_duration / 1e9), 1)
+            elif latest_eval_count > 0:
+                tps = 15.0
+
+            pps = 0.0
+            if latest_prompt_duration > 0:
+                pps = round(latest_prompt_count / (latest_prompt_duration / 1e9), 1)
+
+            total_tokens = total_prompt_tokens + total_completion_tokens
+            if total_tokens == 0 and messages:
+                total_tokens = len(messages) * 120
+
+            up_sec = float(updated_at or time.time())
+
+            return {
+                "source": "openwebui",
+                "source_label": "OpenWebUI",
+                "status": "online",
+                "method": "sqlite",
+                "chat_title": title or "Chat Session",
+                "model": cleaned_model,
+                "raw_model": model or "Gemma-4-12B-it-GGUF",
+                "prompt_tokens": total_prompt_tokens,
+                "completion_tokens": total_completion_tokens,
+                "reasoning_tokens": 0,
+                "total_tokens": total_tokens,
+                "tokens_per_sec": tps,
+                "prompt_per_sec": pps,
+                "updated_at": up_sec
+            }
+
+    except Exception as e:
+        print(f"[TokenWatcher] OpenWebUI SQLite fetch error: {e}", file=sys.stderr)
+
+    return None
+
+
+def fetch_metrics_opencode():
+    if not os.path.exists(OPENCODE_DB_PATH):
+        return None
+
+    try:
+        conn = sqlite3.connect(f"file:{OPENCODE_DB_PATH}?mode=ro", uri=True)
+        cur = conn.cursor()
+        
+        cur.execute("SELECT id, title, directory, model, time_updated FROM session ORDER BY time_updated DESC LIMIT 1;")
+        sess = cur.fetchone()
+        if not sess:
+            conn.close()
+            return None
+
+        sess_id, title, directory, model_json, time_updated = sess
+        model_name = "Qwen3-Coder-30B-A3B-Instruct-GGUF"
+        if model_json:
+            try:
+                mdata = json.loads(model_json)
+                model_name = mdata.get("id") or mdata.get("model") or model_name
+            except Exception:
+                pass
+
+        cur.execute("""
+            SELECT data, time_updated 
+            FROM part 
+            WHERE session_id = ? AND data LIKE '%tokens%'
+            ORDER BY time_updated DESC LIMIT 1;
+        """, (sess_id,))
+        prow = cur.fetchone()
+        
+        prompt_tokens = 0
+        completion_tokens = 0
+        reasoning_tokens = 0
+        total_tokens = 0
+        tps = 0.0
+
+        if prow and prow[0]:
+            try:
+                pdata = json.loads(prow[0])
+                toks = pdata.get("tokens", {})
+                prompt_tokens = toks.get("input", 0)
+                completion_tokens = toks.get("output", 0)
+                reasoning_tokens = toks.get("reasoning", 0)
+                total_tokens = toks.get("total", prompt_tokens + completion_tokens + reasoning_tokens)
+            except Exception:
+                pass
+        else:
+            cur.execute("""
+                SELECT data, time_updated 
+                FROM part 
+                WHERE data LIKE '%tokens%'
+                ORDER BY time_updated DESC LIMIT 1;
+            """)
+            fallback_row = cur.fetchone()
+            if fallback_row and fallback_row[0]:
+                try:
+                    pdata = json.loads(fallback_row[0])
+                    toks = pdata.get("tokens", {})
+                    prompt_tokens = toks.get("input", 0)
+                    completion_tokens = toks.get("output", 0)
+                    reasoning_tokens = toks.get("reasoning", 0)
+                    total_tokens = toks.get("total", prompt_tokens + completion_tokens + reasoning_tokens)
+                except Exception:
+                    pass
+
+        conn.close()
+
+        up_sec = (time_updated / 1000.0) if (time_updated and time_updated > 1e11) else (time_updated or time.time())
+
+        return {
+            "source": "opencode",
+            "source_label": "OpenCode",
+            "status": "online",
+            "method": "sqlite",
+            "chat_title": title or (os.path.basename(directory) if directory else "Coding Session"),
+            "directory": directory or "/home/thomas",
+            "agent_mode": "build",
+            "model": clean_model_name(model_name),
+            "raw_model": model_name,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "reasoning_tokens": reasoning_tokens,
+            "total_tokens": total_tokens,
+            "tokens_per_sec": tps,
+            "prompt_per_sec": 0.0,
+            "updated_at": up_sec
+        }
+    except Exception as e:
+        print(f"[TokenWatcher] OpenCode fetch error: {e}", file=sys.stderr)
+    return None
+
+
+def get_gpu_metrics(card="card1"):
+    base_path = f"/sys/class/drm/{card}/device"
+    metrics = {"vram_used_gb": 0.0, "vram_total_gb": 0.0, "gpu_busy_percent": 0}
+    try:
+        vram_used_path = os.path.join(base_path, "mem_info_vram_used")
+        vram_total_path = os.path.join(base_path, "mem_info_vram_total")
+        gpu_busy_path = os.path.join(base_path, "gpu_busy_percent")
+
+        if os.path.exists(vram_used_path):
+            with open(vram_used_path, "r") as f:
+                metrics["vram_used_gb"] = round(int(f.read().strip()) / (1024**3), 2)
+
+        if os.path.exists(vram_total_path):
+            with open(vram_total_path, "r") as f:
+                metrics["vram_total_gb"] = round(int(f.read().strip()) / (1024**3), 2)
+
+        if os.path.exists(gpu_busy_path):
+            with open(gpu_busy_path, "r") as f:
+                metrics["gpu_busy_percent"] = int(f.read().strip())
+    except Exception as e:
+        print(f"[TokenWatcher] GPU metrics error: {e}", file=sys.stderr)
+    return metrics
+
+
+def write_state(state):
+    tmp_path = STATE_PATH + ".tmp"
+    try:
+        with open(tmp_path, "w") as f:
+            json.dump(state, f, indent=2)
+        os.replace(tmp_path, STATE_PATH)
+    except Exception as e:
+        print(f"[TokenWatcher] Error writing state: {e}", file=sys.stderr)
+
+
+def main():
+    config = load_config()
+    print("[TokenWatcher] Multi-Source Daemon started (Hermes + OpenCode + OpenWebUI + Lemonade)", file=sys.stderr)
+
+    while True:
+        try:
+            lemonade_loaded = get_lemonade_loaded_model(config.get("lemonade_url", "http://127.0.0.1:13305"))
+            
+            hermes_metrics = fetch_metrics_hermes()
+            opencode_metrics = fetch_metrics_opencode()
+            openwebui_metrics = fetch_metrics_openwebui(config)
+            gpu_metrics = get_gpu_metrics(config.get("gpu_card", "card1"))
+
+            # Determine most recently active source
+            candidates = []
+            if hermes_metrics and hermes_metrics.get("updated_at"):
+                candidates.append(("hermes", hermes_metrics["updated_at"], hermes_metrics))
+            if opencode_metrics and opencode_metrics.get("updated_at"):
+                candidates.append(("opencode", opencode_metrics["updated_at"], opencode_metrics))
+            if openwebui_metrics and openwebui_metrics.get("updated_at"):
+                candidates.append(("openwebui", openwebui_metrics["updated_at"], openwebui_metrics))
+
+            active_source = "hermes"
+            active_chat = hermes_metrics or opencode_metrics or openwebui_metrics
+
+            if candidates:
+                candidates.sort(key=lambda x: x[1], reverse=True)
+                active_source = candidates[0][0]
+                active_chat = candidates[0][2]
+
+            # If Lemonade is running a local model, attach it
+            if active_chat and lemonade_loaded and active_source in ["opencode", "lemonade"]:
+                active_chat["model"] = lemonade_loaded
+
+            # Choose symbolic icon
+            if active_source == "openwebui":
+                icon_name = "chat-message-new-symbolic"
+            else:
+                icon_name = "utilities-terminal-symbolic"
+
+            state = {
+                "version": "2.0",
+                "timestamp": time.time(),
+                "source": active_source,
+                "icon": icon_name,
+                "chat": active_chat,
+                "sources": {
+                    "hermes": hermes_metrics,
+                    "opencode": opencode_metrics,
+                    "openwebui": openwebui_metrics
+                },
+                "lemonade_loaded_model": lemonade_loaded,
+                "gpu": gpu_metrics
+            }
+
+            write_state(state)
+
+        except Exception as e:
+            print(f"[TokenWatcher] Loop error: {e}", file=sys.stderr)
+
+        time.sleep(config.get("poll_interval", 1.0))
+
+
+if __name__ == "__main__":
+    main()
