@@ -1,66 +1,67 @@
 # TokenWatcher TopBar
 
-> **Moniteur temps réel d'activité LLM (Hermes, OpenCode, OpenWebUI) et de VRAM GPU AMD Radeon dans la barre supérieure de GNOME.**
+> **Real-time LLM activity monitor (Hermes, OpenCode, OpenWebUI) and AMD Radeon GPU VRAM tracker in the GNOME Top Bar.**
 
 ---
 
-## 🌟 Présentation
+## 🌟 Overview
 
-**TokenWatcher** est une extension GNOME Shell (compatible GNOME 45 à 50+ sous Wayland/X11) couplée à un daemon ultra-léger en Python. Elle permet de suivre en temps réel dans votre barre supérieure :
-- Le **modèle LLM actif** avec alias nettoyé (*Gemini 3.7 Flash*, *Qwen3-Coder-30B*, *Gemma-4-12B*, etc.).
-- Le **volume cumulé de tokens** formaté au standard `#,##M` (ex: `2,37M`).
-- La **vitesse de génération** en direct (`X,X t/s`).
-- L'**utilisation de la VRAM GPU** sur APU AMD (Strix Halo / Radeon 8060S / dGPU AMD).
-- La **source active** en cours d'exécution (*Hermes*, *OpenCode*, *OpenWebUI*).
+**TokenWatcher** is a GNOME Shell extension (compatible with GNOME 45 through 50+ on Wayland and X11) paired with an ultra-lightweight Python daemon. It provides real-time monitoring directly in your top bar:
+- The **active LLM model** with cleaned aliases (*Gemini 3.7 Flash*, *Qwen3-Coder-30B*, *Gemma-4-12B*, etc.).
+- The **cumulative token volume** formatted in standard millions `#,##M` (e.g., `2.37M`).
+- The **live generation speed** (`X.X t/s`).
+- The **GPU VRAM usage** on AMD APUs (Strix Halo / Radeon 8060S / AMD dGPUs).
+- The **active execution source** (*Hermes*, *OpenCode*, *OpenWebUI*).
 
 ```text
 ┌────────────────────────────────────────────────────────────────────────┐
-│ [Terminal] Qwen3-Coder-30B | 0,05M | 28,4 t/s | VRAM 14,4 Go | OpenCode│
+│ [Terminal] Qwen3-Coder-30B | 0.05M | 28.4 t/s | VRAM 14.4 GB | OpenCode│
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## 🚀 Architecture & Fonctionnalités
+## 🚀 Architecture & Features
 
-### 1. Arbitrage Multi-Source Intelligent
-Le daemon surveille en parallèle et sans latence :
-1. **Hermes Agent** : Lecture SQLite temps réel de `~/.hermes/state.db` (sessions, modèles, tokens prompt/completion, tool calls).
-2. **OpenCode** : Surveillance SQLite de `~/.local/share/opencode/opencode.db` (sessions, messages, calcul delta temps réel $\Delta t < 3\text{s}$ et tokens/s).
-3. **Open WebUI** : Surveillance SQLite de `webui.db` et ports locaux.
-4. **Lemonade Server** : Surveillance de l'API locale (port 13305) et du modèle chargé en VRAM.
+### 1. Intelligent Multi-Source Arbitration
+The background daemon continuously monitors local sources with zero overhead:
+1. **Hermes Agent**: Real-time SQLite tracking of `~/.hermes/state.db` (sessions, models, prompt/completion tokens, tool calls).
+2. **OpenCode**: Real-time SQLite monitoring of `~/.local/share/opencode/opencode.db` (sessions, messages, real-time delta calculation $\Delta t < 3\text{s}$, and tokens/s).
+3. **Open WebUI**: SQLite monitoring of `webui.db` and local ports.
+4. **Lemonade Server**: Monitoring of the local REST API (port 13305) and the model loaded in VRAM.
 
-> **Priorité dynamique :** Dès qu'OpenCode ou un agent spécialisé commence une génération, l'indicateur bascule instantanément sur la tâche en cours, puis revient à l'orchestrateur principal une fois le travail achevé.
+> **Dynamic Priority:** As soon as OpenCode or a specialized agent begins generating code, the top bar indicator instantly switches to the active task, then smoothly returns to the primary orchestrator once the job is finished.
 
-### 2. Surveillance Matérielle AMD (APU / GPU)
-* Lecture directe via `amdgpu_top` et `/sys/class/drm/card*/device/mem_info_vram_*`.
-* Détection précise de l'allocation mémoire partagée / dédiée de l'APU AMD Strix Halo (Radeon 8060S).
+### 2. AMD Hardware & VRAM Monitoring (APU / GPU)
+* Direct extraction via `amdgpu_top` and `/sys/class/drm/card*/device/mem_info_vram_*`.
+* Accurate detection of shared / dedicated memory allocation for the AMD Strix Halo APU (Radeon 8060S).
 
-### 3. Popover Détaillé
-Un clic sur l'indicateur ouvre un menu popover affichant :
-* Le contexte/titre de la session ou du projet en cours.
-* Le modèle complet et ses alias.
-* La répartition `Prompt in` vs `Completion out` et le total en millions (`#,##M`).
-* La vitesse de génération instantanée.
-* L'occupation GPU et VRAM.
-* Des raccourcis directs vers les interfaces Web (Open WebUI : 8080, Lemonade : 13305).
+### 3. Interactive Popover Menu
+Clicking the indicator opens a detailed popover menu displaying:
+* Current session or project context and title.
+* Full model name and clean aliases.
+* Token breakdown (`Prompt in` vs `Completion out`) and total in millions (`#,##M`).
+* Instant generation speed ($t/s$).
+* GPU and VRAM utilization.
+* Direct shortcuts to local Web UIs (Open WebUI: port 8080, Lemonade: port 13305).
 
 ---
 
-## 📁 Structure du Projet
+## 📁 Project Structure
 
 ```text
 TokenWatcher-TopBar/
 ├── extension/
-│   ├── extension.js         # Code de l'extension GNOME 45-50 (GObject ES6)
-│   ├── metadata.json        # Métadonnées et compatibilité GNOME Shell
-│   └── stylesheet.css       # Styles visuels et popover
+│   ├── extension.js         # GNOME 45-50 extension code (GObject ES6)
+│   ├── metadata.json        # Extension metadata & GNOME Shell compatibility
+│   └── stylesheet.css       # Visual styles & popover design
 ├── daemon/
-│   └── tokenwatcher-daemon  # Daemon multi-source Python (IPC /tmp/tokenwatcher_state.json)
+│   └── tokenwatcher-daemon  # Multi-source Python daemon (IPC via /tmp/tokenwatcher_state.json)
 ├── systemd/
-│   └── tokenwatcher.service # Unité systemd utilisateur
-├── install.sh               # Script d'installation automatique
-├── uninstall.sh             # Script de désinstallation propre
+│   └── tokenwatcher.service # Systemd user service unit
+├── install.sh               # Automated 1-click installation script
+├── uninstall.sh             # Clean uninstallation script
+├── readme-setup.md          # Dedicated step-by-step setup guide
 ├── .gitignore
 └── README.md
 ```
@@ -69,9 +70,9 @@ TokenWatcher-TopBar/
 
 ## 🛠️ Installation
 
-### Installation rapide
+### Quick Start (Automated)
 
-Clonez le dépôt et lancez le script d'installation :
+Clone the repository and run the installation script:
 
 ```bash
 git clone https://github.com/ThomasK2020/tokenwatcher-topbar.git
@@ -79,34 +80,34 @@ cd tokenwatcher-topbar
 ./install.sh
 ```
 
-> **Note Wayland / GNOME Shell :** Sous Wayland, si l'extension vient d'être installée ou mise à jour, fermez et rouvrez votre session utilisateur GNOME (*Log Out / Log In*) pour que le Shell charge le module.
+> **Note for Wayland / GNOME Shell:** Under Wayland, if the extension was just installed or updated, please log out and log back in to your GNOME user session (*Log Out / Log In*) so the Shell loads the module.
 
 ---
 
-## 🔍 Commandes Utiles & Diagnostic
+## 🔍 Useful Commands & Diagnostics
 
-### Statut du daemon de métriques
+### Check the metrics daemon status
 ```bash
 systemctl --user status tokenwatcher.service
 ```
 
-### Journal du daemon
+### View live daemon logs
 ```bash
 journalctl --user -u tokenwatcher.service -f
 ```
 
-### Vérifier l'état IPC en direct
+### Inspect real-time IPC output
 ```bash
 cat /tmp/tokenwatcher_state.json | jq .
 ```
 
-### Tester l'extension sous GNOME
+### Inspect the GNOME extension state
 ```bash
 gnome-extensions info tokenwatcher@thomas.local
 ```
 
 ---
 
-## 📄 Licence
+## 📄 License
 
-MIT License - Conçu pour optimiser le flux de travail avec assistants IA et accélérateurs matériels locaux.
+MIT License — Designed to optimize developer workflows with local AI assistants and hardware accelerators.
