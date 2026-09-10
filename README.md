@@ -4,9 +4,15 @@
 
 ---
 
+## 📖 About
+
+**TokenWatcher TopBar** is an intelligent, high-performance GNOME Shell extension and companion daemon designed for developers and AI engineers running local and hybrid LLM workflows. It delivers unified, real-time observability over your AI agent activities, streaming token consumption, generation throughput ($t/s$), and hardware acceleration metrics directly in your Linux desktop panel.
+
+---
+
 ## 🌟 Overview
 
-**TokenWatcher** is a GNOME Shell extension (compatible with GNOME 45 through 50+ on Wayland and X11) paired with an ultra-lightweight Python daemon. It provides real-time monitoring directly in your top bar:
+**TokenWatcher** is compatible with GNOME Shell 45 through 50+ on both Wayland and X11, paired with an ultra-lightweight Python background daemon. It provides real-time monitoring directly in your top bar:
 - The **active LLM model** with cleaned aliases (*Gemini 3.7 Flash*, *Qwen3-Coder-30B*, *Gemma-4-12B*, etc.).
 - The **cumulative token volume** formatted in standard millions `#,##M` (e.g., `2.37M`).
 - The **live generation speed** (`X.X t/s`).
@@ -62,6 +68,7 @@ TokenWatcher-TopBar/
 ├── install.sh               # Automated 1-click installation script
 ├── uninstall.sh             # Clean uninstallation script
 ├── readme-setup.md          # Dedicated step-by-step setup guide
+├── LICENSE                  # GNU General Public License v3.0 (GPL-3.0)
 ├── .gitignore
 └── README.md
 ```
@@ -108,6 +115,12 @@ gnome-extensions info tokenwatcher@thomas.local
 
 ---
 
+## 👤 Author
+
+* **Thomas** ([@ThomasK2020](https://github.com/ThomasK2020))
+
+---
+
 ## 📄 License
 
-MIT License — Designed to optimize developer workflows with local AI assistants and hardware accelerators.
+Distributed under the **GNU General Public License v3.0 (GPL-3.0)**. See [`LICENSE`](LICENSE) for more information.

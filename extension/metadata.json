@@ -1,7 +1,7 @@
 {
   "uuid": "tokenwatcher@thomas.local",
   "name": "TokenWatcher",
-  "description": "Real-time Open WebUI Token & AMD GPU Monitor in GNOME Top Bar",
+  "description": "Real-time LLM token counter, generation speed (t/s) and AMD APU/GPU VRAM monitor in GNOME Top Bar (Hermes, OpenCode, OpenWebUI, Lemonade)",
   "shell-version": [
     "45",
     "46",
@@ -12,6 +12,6 @@
     "50.1",
     "51"
   ],
-  "url": "https://localhost",
+  "url": "https://github.com/ThomasK2020/tokenwatcher-topbar",
   "version": 1
 }
