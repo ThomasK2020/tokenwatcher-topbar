@@ -28,6 +28,18 @@ cp "$SCRIPT_DIR/extension/extension.js" "$EXT_DEST/"
 cp "$SCRIPT_DIR/extension/metadata.json" "$EXT_DEST/"
 cp "$SCRIPT_DIR/extension/stylesheet.css" "$EXT_DEST/"
 
+# Package bundle extension pour l'enregistrement auprès de GNOME Shell
+if command -v gnome-extensions &>/dev/null; then
+    (
+        cd "$SCRIPT_DIR/extension"
+        gnome-extensions pack -f -o /tmp/ &>/dev/null || true
+        if [ -f "/tmp/$EXT_UUID.shell-extension.zip" ]; then
+            gnome-extensions install -f "/tmp/$EXT_UUID.shell-extension.zip" &>/dev/null || true
+            rm -f "/tmp/$EXT_UUID.shell-extension.zip"
+        fi
+    )
+fi
+
 # 3. Déploiement du daemon Python
 echo "[-] Installation du daemon de métriques AI & VRAM..."
 mkdir -p "$BIN_DEST"
@@ -69,5 +81,5 @@ gnome-extensions enable "$ASTRA_UUID" 2>/dev/null || true
 
 echo ""
 echo "=== Installation terminée avec succès ==="
-echo "Note : Si les indicateurs n'apparaissent pas immédiatement sous Wayland,"
-echo "veuillez fermer et rouvrir votre session utilisateur GNOME (Log Out / Log In)."
+echo "Note : Si l'indicateur TokenWatcher n'apparaît pas immédiatement dans la barre supérieure sous Wayland,"
+echo "effectuez une simple déconnexion/reconnexion de votre session GNOME (Log Out / Log In)."

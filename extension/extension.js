@@ -204,7 +204,7 @@ class TokenWatcherIndicator extends PanelMenu.Button {
             this.gpuItem.label.set_text(`GPU: ${gpuBusy}% Load | VRAM: ${vramFormatted} Go / ${totalVramFormatted} Go`);
 
         } catch (e) {
-            log(`[TokenWatcher] Extension update error: ${e}`);
+            console.error(`[TokenWatcher] Extension update error: ${e}`);
         }
     }
 });
