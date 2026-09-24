@@ -367,7 +367,7 @@ def fetch_metrics_opencode():
 
 def get_gpu_metrics(card="card1"):
     base_path = f"/sys/class/drm/{card}/device"
-    metrics = {"vram_used_gb": 0.0, "vram_total_gb": 0.0, "gpu_busy_percent": 0}
+    metrics = {"vram_used_gb": 0.0, "vram_total_gb": 0.0, "gpu_busy_percent": 0, "temp_c": 0}
     try:
         vram_used_path = os.path.join(base_path, "mem_info_vram_used")
         vram_total_path = os.path.join(base_path, "mem_info_vram_total")
@@ -384,6 +384,15 @@ def get_gpu_metrics(card="card1"):
         if os.path.exists(gpu_busy_path):
             with open(gpu_busy_path, "r") as f:
                 metrics["gpu_busy_percent"] = int(f.read().strip())
+
+        hwmon_base = os.path.join(base_path, "hwmon")
+        if os.path.exists(hwmon_base):
+            for sub in os.listdir(hwmon_base):
+                temp_path = os.path.join(hwmon_base, sub, "temp1_input")
+                if os.path.exists(temp_path):
+                    with open(temp_path, "r") as f:
+                        metrics["temp_c"] = int(int(f.read().strip()) / 1000)
+                    break
     except Exception as e:
         print(f"[TokenWatcher] GPU metrics error: {e}", file=sys.stderr)
     return metrics

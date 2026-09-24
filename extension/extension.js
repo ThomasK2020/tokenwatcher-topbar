@@ -166,9 +166,10 @@ class TokenWatcherIndicator extends PanelMenu.Button {
             const vramGb = (typeof gpu.vram_used_gb === 'number') ? gpu.vram_used_gb : 0.0;
             const vramFormatted = vramGb.toFixed(1).replace('.', ',');
             const gpuBusy = gpu.gpu_busy_percent || 0;
+            const tempC = gpu.temp_c || 0;
 
             // Clean TopBar Format:
-            // [Icon] <Model Alias> | <#,##M> | VRAM <X,X Go> | <Source>
+            // [Icon] <Model Alias> | <#,##M> | VRAM <X,X Go> | <XX°C> | <Source>
             let parts = [];
             parts.push(modelAlias);
             parts.push(formattedTotalTokensM);
@@ -178,6 +179,9 @@ class TokenWatcherIndicator extends PanelMenu.Button {
             }
             
             parts.push(`VRAM ${vramFormatted} Go`);
+            if (tempC > 0) {
+                parts.push(`${tempC}°C`);
+            }
             parts.push(sourceDisplay);
 
             const labelText = parts.join(' | ');
@@ -201,7 +205,8 @@ class TokenWatcherIndicator extends PanelMenu.Button {
 
             const totalVramGb = (typeof gpu.vram_total_gb === 'number') ? gpu.vram_total_gb : 16.0;
             const totalVramFormatted = totalVramGb.toFixed(1).replace('.', ',');
-            this.gpuItem.label.set_text(`GPU: ${gpuBusy}% Load | VRAM: ${vramFormatted} Go / ${totalVramFormatted} Go`);
+            const tempStr = tempC > 0 ? ` | ${tempC}°C` : '';
+            this.gpuItem.label.set_text(`GPU: ${gpuBusy}% Load | VRAM: ${vramFormatted} Go / ${totalVramFormatted} Go${tempStr}`);
 
         } catch (e) {
             console.error(`[TokenWatcher] Extension update error: ${e}`);
