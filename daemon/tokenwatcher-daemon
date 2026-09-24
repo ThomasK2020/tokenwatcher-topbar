@@ -421,8 +421,8 @@ def main():
             if openwebui_metrics and openwebui_metrics.get("updated_at"):
                 candidates.append(("openwebui", openwebui_metrics["updated_at"], openwebui_metrics))
 
-            active_source = "hermes"
-            active_chat = hermes_metrics or opencode_metrics or openwebui_metrics
+            active_source = ""
+            active_chat = None
 
             if candidates:
                 candidates.sort(key=lambda x: x[1], reverse=True)

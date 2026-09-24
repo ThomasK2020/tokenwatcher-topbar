@@ -38,7 +38,7 @@ function formatTokensM(count) {
 }
 
 function getSourceDisplayName(src) {
-    if (!src) return 'Hermes';
+    if (!src || src.trim() === '' || src === 'none' || src === 'n/a') return '--n/a--';
     const s = src.toLowerCase();
     if (s === 'hermes') return 'Hermes';
     if (s === 'opencode') return 'OpenCode';
@@ -146,7 +146,7 @@ class TokenWatcherIndicator extends PanelMenu.Button {
             const decoder = new TextDecoder('utf-8');
             const state = JSON.parse(decoder.decode(contents));
 
-            const source = state.source || 'hermes';
+            const source = state.source || '';
             const chat = state.chat || {};
             const gpu = state.gpu || {};
             const rawModel = chat.model || state.lemonade_loaded_model || 'Standby';
@@ -154,7 +154,7 @@ class TokenWatcherIndicator extends PanelMenu.Button {
             const sourceDisplay = getSourceDisplayName(source);
 
             // Icon according to source
-            if (source === 'openwebui') {
+            if (source.toLowerCase() === 'openwebui') {
                 this.icon.icon_name = 'chat-message-new-symbolic';
             } else {
                 this.icon.icon_name = 'utilities-terminal-symbolic';
