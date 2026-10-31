@@ -1,0 +1,18 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "lemonade/Qwen3-Coder-30B-A3B-Instruct-GGUF",
+  "instructions": [
+    "AGENTS.md",
+    "SOW/00_AGENT_CODING_RULES.md",
+    "SOW/architecture/AMD_STRIX_HALO_SENSORS.md"
+  ],
+  "watcher": {
+    "ignore": [
+      "../Widget/**",
+      "SOW/archive/**",
+      ".git/**",
+      "__pycache__/**",
+      "*.pyc"
+    ]
+  }
+}
