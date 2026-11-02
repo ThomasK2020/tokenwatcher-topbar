@@ -67,7 +67,7 @@ class TokenWatcherIndicator extends PanelMenu.Button {
         });
         this.box.add_child(this.icon);
 
-        // Label: [LLM Alias] | [#,##M] | [VRAM #,# Go] | [Source]
+        // Label: [LLM Alias] | [#,##M] | [VRAM #,# Go] | [XX°C] | [Source]
         this.label = new St.Label({
             text: 'TokenWatcher',
             y_align: Clutter.ActorAlign.CENTER,
@@ -77,6 +77,8 @@ class TokenWatcherIndicator extends PanelMenu.Button {
 
         this.add_child(this.box);
 
+        this._cancellable = new Gio.Cancellable();
+        this._signalIds = [];
         this._buildMenu();
     }
 
@@ -111,105 +113,215 @@ class TokenWatcherIndicator extends PanelMenu.Button {
         this.speedItem.label.add_style_class_name('tokenwatcher-popover-item');
         this.menu.addMenuItem(this.speedItem);
 
-        this.gpuItem = new PopupMenu.PopupMenuItem('GPU: 0% | VRAM: 0,0 Go', { reactive: false });
+        this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
+
+        // GPU / Hardware Telemetry Section (Lot 1.3)
+        this.gpuHeaderItem = new PopupMenu.PopupMenuItem('GPU / Hardware Telemetry', { reactive: false });
+        this.gpuHeaderItem.label.add_style_class_name('tokenwatcher-popover-header');
+        this.menu.addMenuItem(this.gpuHeaderItem);
+
+        // Line 1: VRAM Used / Total (existing format preserved)
+        this.gpuItem = new PopupMenu.PopupMenuItem('GPU: 0% Load | VRAM: 0,0 Go / 16,0 Go', { reactive: false });
         this.gpuItem.label.add_style_class_name('tokenwatcher-popover-item');
         this.menu.addMenuItem(this.gpuItem);
 
-        this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
+        // Line 2: GPU Temp (Edge): <XX> °C | SoC (Tctl): <YY> °C
+        this.gpuTempItem = new PopupMenu.PopupMenuItem('', { reactive: false });
+        this.gpuTempItem.label.add_style_class_name('tokenwatcher-popover-item');
+        this.gpuTempItem.visible = false;
+        this.menu.addMenuItem(this.gpuTempItem);
 
-        // Fast Action Buttons
+        // Line 3: GPU Power: <X> W | Clock: <XXX> MHz
+        this.gpuPowerClockItem = new PopupMenu.PopupMenuItem('', { reactive: false });
+        this.gpuPowerClockItem.label.add_style_class_name('tokenwatcher-popover-item');
+        this.gpuPowerClockItem.visible = false;
+        this.menu.addMenuItem(this.gpuPowerClockItem);
+
+        this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
         const openWebuiItem = new PopupMenu.PopupMenuItem('Ouvrir Open WebUI (8080)');
-        openWebuiItem.connect('activate', () => {
+        const id1 = openWebuiItem.connect('activate', () => {
             Gio.AppInfo.launch_default_for_uri('http://127.0.0.1:8080', null);
         });
+        this._signalIds.push({ actor: openWebuiItem, id: id1 });
         this.menu.addMenuItem(openWebuiItem);
 
         const openLemonadeItem = new PopupMenu.PopupMenuItem('Ouvrir Lemonade Server (13305)');
-        openLemonadeItem.connect('activate', () => {
+        const id2 = openLemonadeItem.connect('activate', () => {
             Gio.AppInfo.launch_default_for_uri('http://127.0.0.1:13305', null);
         });
+        this._signalIds.push({ actor: openLemonadeItem, id: id2 });
         this.menu.addMenuItem(openLemonadeItem);
     }
 
     updateState() {
         const file = Gio.File.new_for_path(STATE_FILE_PATH);
-        if (!file.query_exists(null)) {
+        file.load_contents_async(this._cancellable, (fileObj, res) => {
+            try {
+                const [success, contents] = fileObj.load_contents_finish(res);
+                if (!success || !contents) {
+                    this.icon.icon_name = 'utilities-terminal-symbolic';
+                    this.label.set_text('Standby');
+                    return;
+                }
+
+                const decoder = new TextDecoder('utf-8');
+                const state = JSON.parse(decoder.decode(contents));
+                this._applyState(state);
+            } catch (e) {
+                if (e.matches && e.matches(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED)) {
+                    return;
+                }
+                if (e.matches && e.matches(Gio.IOErrorEnum, Gio.IOErrorEnum.NOT_FOUND)) {
+                    this.icon.icon_name = 'utilities-terminal-symbolic';
+                    this.label.set_text('Standby');
+                    return;
+                }
+                console.error(`[TokenWatcher] Extension update error: ${e}`);
+            }
+        });
+    }
+
+    _applyState(state) {
+        const source = state.source || '';
+        const chat = state.chat || {};
+        const gpu = state.gpu || {};
+        const rawModel = chat.model || state.lemonade_loaded_model || 'Standby';
+        const modelAlias = getModelAlias(rawModel);
+        const sourceDisplay = getSourceDisplayName(source);
+
+        if (source.toLowerCase() === 'openwebui') {
+            this.icon.icon_name = 'chat-message-new-symbolic';
+        } else {
             this.icon.icon_name = 'utilities-terminal-symbolic';
-            this.label.set_text('Standby');
-            return;
         }
 
-        try {
-            const [success, contents] = file.load_contents(null);
-            if (!success) return;
+        const tps = chat.tokens_per_sec || 0.0;
+        const totalTokens = chat.total_tokens || 0;
+        const formattedTotalTokensM = formatTokensM(totalTokens);
+        const vramGb = (typeof gpu.vram_used_gb === 'number') ? gpu.vram_used_gb : 0.0;
+        const vramFormatted = vramGb.toFixed(1).replace('.', ',');
+        const gpuBusy = gpu.gpu_busy_percent || 0;
 
-            const decoder = new TextDecoder('utf-8');
-            const state = JSON.parse(decoder.decode(contents));
+        const rawGpuTemp = (state.gpu_temp_c !== undefined) ? state.gpu_temp_c : gpu.gpu_temp_c;
+        const gpuTempC = (typeof rawGpuTemp === 'number' && Number.isFinite(rawGpuTemp) && rawGpuTemp >= 5 && rawGpuTemp <= 125)
+            ? Math.round(rawGpuTemp)
+            : null;
 
-            const source = state.source || '';
-            const chat = state.chat || {};
-            const gpu = state.gpu || {};
-            const rawModel = chat.model || state.lemonade_loaded_model || 'Standby';
-            const modelAlias = getModelAlias(rawModel);
-            const sourceDisplay = getSourceDisplayName(source);
+        const rawCpuTemp = (state.cpu_temp_tctl_c !== undefined) ? state.cpu_temp_tctl_c : gpu.cpu_temp_tctl_c;
+        const cpuTempC = (typeof rawCpuTemp === 'number' && Number.isFinite(rawCpuTemp) && rawCpuTemp >= 5 && rawCpuTemp <= 125)
+            ? Math.round(rawCpuTemp)
+            : null;
 
-            // Icon according to source
-            if (source.toLowerCase() === 'openwebui') {
-                this.icon.icon_name = 'chat-message-new-symbolic';
-            } else {
-                this.icon.icon_name = 'utilities-terminal-symbolic';
+        const rawPowerW = (state.gpu_power_w !== undefined) ? state.gpu_power_w : gpu.gpu_power_w;
+        const gpuPowerW = (typeof rawPowerW === 'number' && Number.isFinite(rawPowerW) && rawPowerW >= 0)
+            ? Math.round(rawPowerW)
+            : null;
+
+        const rawClockMhz = (state.gpu_clock_mhz !== undefined) ? state.gpu_clock_mhz : gpu.gpu_clock_mhz;
+        const gpuClockMhz = (typeof rawClockMhz === 'number' && Number.isFinite(rawClockMhz) && rawClockMhz > 0)
+            ? Math.round(rawClockMhz)
+            : null;
+
+        const tempStatus = state.gpu_temp_status || gpu.gpu_temp_status || null;
+
+        // TopBar Format (Lot 1.2):
+        // ... | <#,##M> | VRAM <X,X Go> | <XX°C> | <Source>
+        let parts = [];
+        parts.push(modelAlias);
+        parts.push(formattedTotalTokensM);
+
+        if (tps > 0) {
+            parts.push(`${tps.toFixed(1)} t/s`);
+        }
+
+        parts.push(`VRAM ${vramFormatted} Go`);
+
+        if (gpuTempC !== null) {
+            parts.push(`${gpuTempC}°C`);
+        }
+        parts.push(sourceDisplay);
+
+        this.label.set_text(parts.join(' | '));
+
+        this.label.remove_style_class_name('tw-temp-normal');
+        this.label.remove_style_class_name('tw-temp-warm');
+        this.label.remove_style_class_name('tw-temp-critical');
+
+        if (gpuTempC !== null) {
+            if (tempStatus === 'normal') {
+                this.label.add_style_class_name('tw-temp-normal');
+            } else if (tempStatus === 'warm') {
+                this.label.add_style_class_name('tw-temp-warm');
+            } else if (tempStatus === 'critical') {
+                this.label.add_style_class_name('tw-temp-critical');
             }
+        }
 
-            const tps = chat.tokens_per_sec || 0.0;
-            const totalTokens = chat.total_tokens || 0;
-            const formattedTotalTokensM = formatTokensM(totalTokens);
-            const vramGb = (typeof gpu.vram_used_gb === 'number') ? gpu.vram_used_gb : 0.0;
-            const vramFormatted = vramGb.toFixed(1).replace('.', ',');
-            const gpuBusy = gpu.gpu_busy_percent || 0;
-            const tempC = gpu.temp_c || 0;
+        // Update Popover Details
+        const agentMode = chat.agent_mode ? ` (${chat.agent_mode})` : '';
+        this.sourceItem.label.set_text(`Source: ${sourceDisplay}${agentMode}`);
 
-            // Clean TopBar Format:
-            // [Icon] <Model Alias> | <#,##M> | VRAM <X,X Go> | <XX°C> | <Source>
-            let parts = [];
-            parts.push(modelAlias);
-            parts.push(formattedTotalTokensM);
-            
-            if (tps > 0) {
-                parts.push(`${tps.toFixed(1)} t/s`);
+        const contextText = chat.chat_title || chat.directory || 'Session Active';
+        this.projectItem.label.set_text(`Contexte: ${contextText}`);
+
+        this.modelItem.label.set_text(`Modèle: ${modelAlias} (${rawModel})`);
+
+        const inTokM = formatTokensM(chat.prompt_tokens || 0);
+        const outTokM = formatTokensM(chat.completion_tokens || 0);
+        this.tokensItem.label.set_text(`Tokens: ${inTokM} in | ${outTokM} out (${formattedTotalTokensM} tot)`);
+
+        const tpsText = tps > 0 ? `${tps.toFixed(1)} t/s (Génération)` : 'Inactif';
+        this.speedItem.label.set_text(`Vitesse: ${tpsText}`);
+
+        // Popover GPU / Hardware Telemetry (Lot 1.3):
+        // Line 1: VRAM Used / Total (conserver le format existant)
+        const totalVramGb = (typeof gpu.vram_total_gb === 'number') ? gpu.vram_total_gb : 16.0;
+        const totalVramFormatted = totalVramGb.toFixed(1).replace('.', ',');
+        this.gpuItem.label.set_text(`GPU: ${gpuBusy}% Load | VRAM: ${vramFormatted} Go / ${totalVramFormatted} Go`);
+
+        // Line 2: GPU Temp (Edge): <XX> °C | SoC (CPU/GPU Hottest Tctl): <YY> °C (masquer la sous-partie si null)
+        let tempParts = [];
+        if (gpuTempC !== null) {
+            tempParts.push(`GPU Temp (Edge): ${gpuTempC} °C`);
+        }
+        if (cpuTempC !== null) {
+            tempParts.push(`SoC (CPU/GPU Hottest Tctl): ${cpuTempC} °C`);
+        }
+        if (tempParts.length > 0) {
+            this.gpuTempItem.label.set_text(tempParts.join(' | '));
+            this.gpuTempItem.visible = true;
+        } else {
+            this.gpuTempItem.visible = false;
+        }
+
+        // Line 3: GPU Power: <X> W | Clock: <XXX> MHz (si disponibles)
+        let powerClockParts = [];
+        if (gpuPowerW !== null) {
+            powerClockParts.push(`GPU Power: ${gpuPowerW} W`);
+        }
+        if (gpuClockMhz !== null) {
+            powerClockParts.push(`Clock: ${gpuClockMhz} MHz`);
+        }
+        if (powerClockParts.length > 0) {
+            this.gpuPowerClockItem.label.set_text(powerClockParts.join(' | '));
+            this.gpuPowerClockItem.visible = true;
+        } else {
+            this.gpuPowerClockItem.visible = false;
+        }
+    }
+
+    cleanup() {
+        if (this._cancellable) {
+            this._cancellable.cancel();
+            this._cancellable = null;
+        }
+        if (this._signalIds) {
+            for (const item of this._signalIds) {
+                if (item.actor && item.id) {
+                    item.actor.disconnect(item.id);
+                }
             }
-            
-            parts.push(`VRAM ${vramFormatted} Go`);
-            if (tempC > 0) {
-                parts.push(`${tempC}°C`);
-            }
-            parts.push(sourceDisplay);
-
-            const labelText = parts.join(' | ');
-            this.label.set_text(labelText);
-
-            // Update Popover Details
-            const agentMode = chat.agent_mode ? ` (${chat.agent_mode})` : '';
-            this.sourceItem.label.set_text(`Source: ${sourceDisplay}${agentMode}`);
-
-            const contextText = chat.chat_title || chat.directory || 'Session Active';
-            this.projectItem.label.set_text(`Contexte: ${contextText}`);
-
-            this.modelItem.label.set_text(`Modèle: ${modelAlias} (${rawModel})`);
-
-            const inTokM = formatTokensM(chat.prompt_tokens || 0);
-            const outTokM = formatTokensM(chat.completion_tokens || 0);
-            this.tokensItem.label.set_text(`Tokens: ${inTokM} in | ${outTokM} out (${formattedTotalTokensM} tot)`);
-
-            const tpsText = tps > 0 ? `${tps.toFixed(1)} t/s (Génération)` : 'Inactif';
-            this.speedItem.label.set_text(`Vitesse: ${tpsText}`);
-
-            const totalVramGb = (typeof gpu.vram_total_gb === 'number') ? gpu.vram_total_gb : 16.0;
-            const totalVramFormatted = totalVramGb.toFixed(1).replace('.', ',');
-            const tempStr = tempC > 0 ? ` | ${tempC}°C` : '';
-            this.gpuItem.label.set_text(`GPU: ${gpuBusy}% Load | VRAM: ${vramFormatted} Go / ${totalVramFormatted} Go${tempStr}`);
-
-        } catch (e) {
-            console.error(`[TokenWatcher] Extension update error: ${e}`);
+            this._signalIds = [];
         }
     }
 });
@@ -236,6 +348,7 @@ export default class TokenWatcherExtension extends Extension {
         }
 
         if (this._indicator) {
+            this._indicator.cleanup();
             this._indicator.destroy();
             this._indicator = null;
         }

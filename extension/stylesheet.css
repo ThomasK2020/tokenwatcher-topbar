@@ -5,6 +5,7 @@
 .tokenwatcher-label {
   font-weight: bold;
   font-size: 10.5pt;
+  font-variant-numeric: tabular-nums;
 }
 
 .tokenwatcher-popover-header {
@@ -17,4 +18,17 @@
   font-size: 10pt;
   margin-top: 2px;
   margin-bottom: 2px;
+}
+
+.tw-temp-normal {
+  color: inherit;
+}
+
+.tw-temp-warm {
+  color: #f59e0b;
+}
+
+.tw-temp-critical {
+  color: #ef4444;
+  font-weight: bold;
 }

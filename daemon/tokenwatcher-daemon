@@ -8,6 +8,9 @@ import sqlite3
 import urllib.request
 import urllib.error
 import gzip
+import subprocess
+import shutil
+from pathlib import Path
 
 CONFIG_PATH = os.path.expanduser("~/.config/tokenwatcher/config.json")
 STATE_PATH = "/tmp/tokenwatcher_state.json"
@@ -19,8 +22,38 @@ IGNORED_MODELS = {"localaicheckstatus", "test", "dummy", "unknown"}
 DEFAULT_CONFIG = {
     "poll_interval": 1.0,
     "lemonade_url": "http://127.0.0.1:13305",
-    "gpu_card": "card1",
     "openwebui_db_path": os.path.expanduser("~/.local/share/open-webui/webui.db")
+}
+
+# Hardware telemetry configuration & constants (zero hardcoded device indices)
+TELEMETRY_CONFIG = {
+    "drm_sysfs_root": Path("/sys/class/drm"),
+    "hwmon_sysfs_root": Path("/sys/class/hwmon"),
+    "amd_vendor_id": "0x1002",
+    "gpu_hwmon_name": "amdgpu",
+    "apu_hwmon_names": ("k10temp", "zenpower"),
+    "edge_label": "edge",
+    "tctl_label": "tctl",
+    "temp_min_c": 5,
+    "temp_max_c": 125,
+    "temp_warm_c": 65,
+    "temp_critical_c": 85,
+    "cli_timeout_s": 2.0,
+    "milli_divisor": 1000,
+    "micro_divisor": 1_000_000,
+}
+
+# In-memory cache of resolved pathlib.Path sensor objects
+_SENSOR_CACHE = {
+    "initialized": False,
+    "drm_device_dir": None,
+    "vram_used": None,
+    "vram_total": None,
+    "gpu_busy": None,
+    "gpu_temp_edge": None,
+    "gpu_power": None,
+    "gpu_clock": None,
+    "cpu_temp_tctl": None,
 }
 
 
@@ -365,37 +398,320 @@ def fetch_metrics_opencode():
     return None
 
 
-def get_gpu_metrics(card="card1"):
-    base_path = f"/sys/class/drm/{card}/device"
-    metrics = {"vram_used_gb": 0.0, "vram_total_gb": 0.0, "gpu_busy_percent": 0, "temp_c": 0}
+def _resolve_temp_input_in_hwmon(hwmon_dir: Path, target_label: str):
+    """Resolve the Path to temp*_input matching target_label (or fallback to temp1_input)."""
     try:
-        vram_used_path = os.path.join(base_path, "mem_info_vram_used")
-        vram_total_path = os.path.join(base_path, "mem_info_vram_total")
-        gpu_busy_path = os.path.join(base_path, "gpu_busy_percent")
+        for label_file in sorted(hwmon_dir.glob("temp*_label")):
+            try:
+                label_val = label_file.read_text(encoding="utf-8").strip().lower()
+            except OSError:
+                continue
+            if label_val == target_label.lower():
+                candidate = hwmon_dir / label_file.name.replace("_label", "_input")
+                if candidate.is_file():
+                    return candidate.resolve()
+        fallback = hwmon_dir / "temp1_input"
+        if fallback.is_file():
+            return fallback.resolve()
+    except OSError:
+        pass
+    return None
 
-        if os.path.exists(vram_used_path):
-            with open(vram_used_path, "r") as f:
-                metrics["vram_used_gb"] = round(int(f.read().strip()) / (1024**3), 2)
 
-        if os.path.exists(vram_total_path):
-            with open(vram_total_path, "r") as f:
-                metrics["vram_total_gb"] = round(int(f.read().strip()) / (1024**3), 2)
+def discover_hardware_sensors():
+    """Dynamically discover and cache Path objects for AMD DRM & hwmon sensors."""
+    _SENSOR_CACHE.update({
+        "initialized": True,
+        "drm_device_dir": None,
+        "vram_used": None,
+        "vram_total": None,
+        "gpu_busy": None,
+        "gpu_temp_edge": None,
+        "gpu_power": None,
+        "gpu_clock": None,
+        "cpu_temp_tctl": None,
+    })
 
-        if os.path.exists(gpu_busy_path):
-            with open(gpu_busy_path, "r") as f:
-                metrics["gpu_busy_percent"] = int(f.read().strip())
+    drm_root = TELEMETRY_CONFIG["drm_sysfs_root"]
+    best_dev_dir = None
 
-        hwmon_base = os.path.join(base_path, "hwmon")
-        if os.path.exists(hwmon_base):
-            for sub in os.listdir(hwmon_base):
-                temp_path = os.path.join(hwmon_base, sub, "temp1_input")
-                if os.path.exists(temp_path):
-                    with open(temp_path, "r") as f:
-                        metrics["temp_c"] = int(int(f.read().strip()) / 1000)
+    try:
+        if drm_root.is_dir():
+            for entry in sorted(drm_root.iterdir()):
+                if not entry.name.startswith("card") or "-" in entry.name:
+                    continue
+                dev_dir = entry / "device"
+                vendor_file = dev_dir / "vendor"
+                if not vendor_file.is_file():
+                    continue
+                try:
+                    vendor_str = vendor_file.read_text(encoding="utf-8").strip().lower()
+                except OSError:
+                    continue
+                if TELEMETRY_CONFIG["amd_vendor_id"] not in vendor_str:
+                    continue
+                has_busy = (dev_dir / "gpu_busy_percent").is_file()
+                has_vram = (dev_dir / "mem_info_vram_used").is_file()
+                if has_busy or has_vram:
+                    best_dev_dir = dev_dir.resolve()
                     break
-    except Exception as e:
-        print(f"[TokenWatcher] GPU metrics error: {e}", file=sys.stderr)
-    return metrics
+                if best_dev_dir is None:
+                    best_dev_dir = dev_dir.resolve()
+    except OSError:
+        pass
+
+    if best_dev_dir is not None:
+        _SENSOR_CACHE["drm_device_dir"] = best_dev_dir
+        for key, filename in (
+            ("vram_used", "mem_info_vram_used"),
+            ("vram_total", "mem_info_vram_total"),
+            ("gpu_busy", "gpu_busy_percent"),
+        ):
+            p = best_dev_dir / filename
+            if p.is_file():
+                _SENSOR_CACHE[key] = p
+
+        hwmon_parent = best_dev_dir / "hwmon"
+        try:
+            if hwmon_parent.is_dir():
+                for hw_dir in sorted(hwmon_parent.iterdir()):
+                    if not hw_dir.is_dir():
+                        continue
+                    edge_path = _resolve_temp_input_in_hwmon(hw_dir, TELEMETRY_CONFIG["edge_label"])
+                    if edge_path is not None:
+                        _SENSOR_CACHE["gpu_temp_edge"] = edge_path
+                    p_avg = hw_dir / "power1_average"
+                    p_in = hw_dir / "power1_input"
+                    if p_avg.is_file():
+                        _SENSOR_CACHE["gpu_power"] = p_avg.resolve()
+                    elif p_in.is_file():
+                        _SENSOR_CACHE["gpu_power"] = p_in.resolve()
+                    f_in = hw_dir / "freq1_input"
+                    if f_in.is_file():
+                        _SENSOR_CACHE["gpu_clock"] = f_in.resolve()
+                    break
+        except OSError:
+            pass
+
+    hwmon_root = TELEMETRY_CONFIG["hwmon_sysfs_root"]
+    try:
+        if hwmon_root.is_dir():
+            for hw_dir in sorted(hwmon_root.iterdir()):
+                name_file = hw_dir / "name"
+                if not name_file.is_file():
+                    continue
+                try:
+                    hw_name = name_file.read_text(encoding="utf-8").strip().lower()
+                except OSError:
+                    continue
+                if hw_name in TELEMETRY_CONFIG["apu_hwmon_names"]:
+                    tctl_path = _resolve_temp_input_in_hwmon(hw_dir, TELEMETRY_CONFIG["tctl_label"])
+                    if tctl_path is not None:
+                        _SENSOR_CACHE["cpu_temp_tctl"] = tctl_path
+                        break
+    except OSError:
+        pass
+
+
+def _sanitize_temp_c(val_float):
+    """Sanitize temperature in Celsius within physical bounds [5, 125]."""
+    try:
+        temp_c = int(round(float(val_float)))
+        if TELEMETRY_CONFIG["temp_min_c"] <= temp_c <= TELEMETRY_CONFIG["temp_max_c"]:
+            return temp_c
+    except (ValueError, TypeError):
+        pass
+    return None
+
+
+def _compute_temp_status(temp_c):
+    """Return 'normal', 'warm', 'critical', or None."""
+    if temp_c is None:
+        return None
+    if temp_c < TELEMETRY_CONFIG["temp_warm_c"]:
+        return "normal"
+    if temp_c < TELEMETRY_CONFIG["temp_critical_c"]:
+        return "warm"
+    return "critical"
+
+
+def _read_cached_sysfs_once():
+    """Read all cached sysfs sensor paths. Raises OSError if a cached file disappears."""
+    out = {
+        "vram_used_gb": 0.0,
+        "vram_total_gb": 0.0,
+        "gpu_busy_percent": 0,
+        "edge_temp_c": None,
+        "cpu_temp_tctl_c": None,
+        "gpu_power_w": None,
+        "gpu_clock_mhz": None,
+    }
+
+    if _SENSOR_CACHE["vram_used"] is not None:
+        raw = _SENSOR_CACHE["vram_used"].read_text(encoding="utf-8").strip()
+        out["vram_used_gb"] = round(int(raw) / (1024**3), 2)
+
+    if _SENSOR_CACHE["vram_total"] is not None:
+        raw = _SENSOR_CACHE["vram_total"].read_text(encoding="utf-8").strip()
+        out["vram_total_gb"] = round(int(raw) / (1024**3), 2)
+
+    if _SENSOR_CACHE["gpu_busy"] is not None:
+        raw = _SENSOR_CACHE["gpu_busy"].read_text(encoding="utf-8").strip()
+        out["gpu_busy_percent"] = int(raw)
+
+    if _SENSOR_CACHE["gpu_temp_edge"] is not None:
+        raw = _SENSOR_CACHE["gpu_temp_edge"].read_text(encoding="utf-8").strip()
+        out["edge_temp_c"] = _sanitize_temp_c(int(raw) / TELEMETRY_CONFIG["milli_divisor"])
+
+    if _SENSOR_CACHE["gpu_power"] is not None:
+        try:
+            raw = _SENSOR_CACHE["gpu_power"].read_text(encoding="utf-8").strip()
+            out["gpu_power_w"] = int(round(int(raw) / TELEMETRY_CONFIG["micro_divisor"]))
+        except (OSError, ValueError):
+            out["gpu_power_w"] = None
+
+    if _SENSOR_CACHE["gpu_clock"] is not None:
+        try:
+            raw = _SENSOR_CACHE["gpu_clock"].read_text(encoding="utf-8").strip()
+            out["gpu_clock_mhz"] = int(round(int(raw) / TELEMETRY_CONFIG["micro_divisor"]))
+        except (OSError, ValueError):
+            out["gpu_clock_mhz"] = None
+
+    if _SENSOR_CACHE["cpu_temp_tctl"] is not None:
+        raw = _SENSOR_CACHE["cpu_temp_tctl"].read_text(encoding="utf-8").strip()
+        out["cpu_temp_tctl_c"] = _sanitize_temp_c(int(raw) / TELEMETRY_CONFIG["milli_divisor"])
+
+    return out
+
+
+def _fallback_sensors_cli():
+    """Level 2 Fallback: sensors -j (shell=False, timeout=2.0)."""
+    edge_c = None
+    tctl_c = None
+    sensors_bin = shutil.which("sensors")
+    if not sensors_bin:
+        return edge_c, tctl_c
+    try:
+        res = subprocess.run(
+            [sensors_bin, "-j"],
+            shell=False,
+            capture_output=True,
+            text=True,
+            timeout=TELEMETRY_CONFIG["cli_timeout_s"],
+        )
+        if res.returncode == 0 and res.stdout:
+            data = json.loads(res.stdout)
+            for chip, entries in data.items():
+                if not isinstance(entries, dict):
+                    continue
+                chip_lower = chip.lower()
+                if "amdgpu" in chip_lower and edge_c is None:
+                    for key, val in entries.items():
+                        if isinstance(val, dict) and key.lower() == TELEMETRY_CONFIG["edge_label"]:
+                            for sub_k, sub_v in val.items():
+                                if sub_k.endswith("_input") and isinstance(sub_v, (int, float)):
+                                    edge_c = _sanitize_temp_c(sub_v)
+                                    break
+                if any(k in chip_lower for k in TELEMETRY_CONFIG["apu_hwmon_names"]) and tctl_c is None:
+                    for key, val in entries.items():
+                        if isinstance(val, dict) and key.lower() == TELEMETRY_CONFIG["tctl_label"]:
+                            for sub_k, sub_v in val.items():
+                                if sub_k.endswith("_input") and isinstance(sub_v, (int, float)):
+                                    tctl_c = _sanitize_temp_c(sub_v)
+                                    break
+    except (OSError, ValueError, subprocess.SubprocessError, json.JSONDecodeError):
+        pass
+    return edge_c, tctl_c
+
+
+def _fallback_amdgpu_top_cli():
+    """Level 3 Fallback: amdgpu_top --dump -J (shell=False, timeout=2.0)."""
+    amdgpu_top_bin = shutil.which("amdgpu_top")
+    if not amdgpu_top_bin:
+        return None
+    try:
+        res = subprocess.run(
+            [amdgpu_top_bin, "--dump", "-J"],
+            shell=False,
+            capture_output=True,
+            text=True,
+            timeout=TELEMETRY_CONFIG["cli_timeout_s"],
+        )
+        if res.returncode == 0 and res.stdout:
+            parsed = json.loads(res.stdout)
+            devices = parsed.get("devices", [parsed]) if isinstance(parsed, dict) else (parsed if isinstance(parsed, list) else [])
+            for dev in devices:
+                if not isinstance(dev, dict):
+                    continue
+                sensors = dev.get("Sensors", {})
+                if isinstance(sensors, dict):
+                    edge_obj = sensors.get("Edge Temperature")
+                    if isinstance(edge_obj, dict) and "value" in edge_obj:
+                        c = _sanitize_temp_c(edge_obj["value"])
+                        if c is not None:
+                            return c
+                    elif isinstance(edge_obj, (int, float)):
+                        c = _sanitize_temp_c(edge_obj)
+                        if c is not None:
+                            return c
+    except (OSError, ValueError, subprocess.SubprocessError, json.JSONDecodeError):
+        pass
+    return None
+
+
+def get_gpu_metrics():
+    """Get GPU & APU telemetry using cached sysfs paths and multi-level CLI fallbacks."""
+    if not _SENSOR_CACHE["initialized"]:
+        discover_hardware_sensors()
+
+    try:
+        raw_metrics = _read_cached_sysfs_once()
+    except (FileNotFoundError, OSError, ValueError):
+        # Re-discover once on cache miss / stale sysfs node
+        discover_hardware_sensors()
+        try:
+            raw_metrics = _read_cached_sysfs_once()
+        except (FileNotFoundError, OSError, ValueError):
+            raw_metrics = {
+                "vram_used_gb": 0.0,
+                "vram_total_gb": 0.0,
+                "gpu_busy_percent": 0,
+                "edge_temp_c": None,
+                "cpu_temp_tctl_c": None,
+                "gpu_power_w": None,
+                "gpu_clock_mhz": None,
+            }
+
+    edge_c = raw_metrics["edge_temp_c"]
+    tctl_c = raw_metrics["cpu_temp_tctl_c"]
+
+    # Level 2 Fallback: sensors -j
+    if edge_c is None or tctl_c is None:
+        fb_edge, fb_tctl = _fallback_sensors_cli()
+        if edge_c is None and fb_edge is not None:
+            edge_c = fb_edge
+        if tctl_c is None and fb_tctl is not None:
+            tctl_c = fb_tctl
+
+    # Level 3 Fallback: amdgpu_top --dump -J
+    if edge_c is None:
+        edge_c = _fallback_amdgpu_top_cli()
+
+    # Primary GPU temperature uses Edge, or falls back to APU Tctl if Edge is unavailable (Lot 1.1)
+    gpu_temp_c = edge_c if edge_c is not None else tctl_c
+    gpu_temp_status = _compute_temp_status(gpu_temp_c)
+
+    return {
+        "vram_used_gb": raw_metrics["vram_used_gb"],
+        "vram_total_gb": raw_metrics["vram_total_gb"],
+        "gpu_busy_percent": raw_metrics["gpu_busy_percent"],
+        "temp_c": gpu_temp_c if gpu_temp_c is not None else 0,
+        "gpu_temp_c": gpu_temp_c,
+        "cpu_temp_tctl_c": tctl_c,
+        "gpu_power_w": raw_metrics["gpu_power_w"],
+        "gpu_clock_mhz": raw_metrics["gpu_clock_mhz"],
+        "gpu_temp_status": gpu_temp_status,
+    }
 
 
 def write_state(state):
@@ -410,6 +726,7 @@ def write_state(state):
 
 def main():
     config = load_config()
+    discover_hardware_sensors()
     print("[TokenWatcher] Multi-Source Daemon started (Hermes + OpenCode + OpenWebUI + Lemonade)", file=sys.stderr)
 
     while True:
@@ -419,7 +736,7 @@ def main():
             hermes_metrics = fetch_metrics_hermes()
             opencode_metrics = fetch_metrics_opencode()
             openwebui_metrics = fetch_metrics_openwebui(config)
-            gpu_metrics = get_gpu_metrics(config.get("gpu_card", "card1"))
+            gpu_metrics = get_gpu_metrics()
 
             # Determine most recently active source
             candidates = []
@@ -460,7 +777,12 @@ def main():
                     "openwebui": openwebui_metrics
                 },
                 "lemonade_loaded_model": lemonade_loaded,
-                "gpu": gpu_metrics
+                "gpu": gpu_metrics,
+                "gpu_temp_c": gpu_metrics.get("gpu_temp_c"),
+                "cpu_temp_tctl_c": gpu_metrics.get("cpu_temp_tctl_c"),
+                "gpu_power_w": gpu_metrics.get("gpu_power_w"),
+                "gpu_clock_mhz": gpu_metrics.get("gpu_clock_mhz"),
+                "gpu_temp_status": gpu_metrics.get("gpu_temp_status"),
             }
 
             write_state(state)
