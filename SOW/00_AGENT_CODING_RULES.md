@@ -5,8 +5,8 @@ Tu travailles EXCLUSIVEMENT dans le dépôt `tokenwatcher-topbar`. Ne touche jam
 
 ## 1. ZÉRO DÉVIATION DU SOW (SOURCE DE VÉRITÉ UNIQUE)
 - Avant toute modification de code, lis intégralement le fichier SOW cible dans `SOW/specs/` et la référence matérielle `SOW/architecture/AMD_STRIX_HALO_SENSORS.md`.
-- Implémente **exactement** les clés JSON, les seuils, les formats de chaîne et les algorithmes décrits dans le SOW.
-- **Interdiction absolue** d'ajouter des fonctionnalités hors périmètre, de renommer des clés JSON existantes ou de modifier le comportement du compteur de tokens, du débit (t/s) ou de la VRAM existante.
+- Implémente **exactement** les clés JSON, les seuils, les formats de chaîne et les algorithmes décrits dans le SOW cible actif.
+- **Interdiction absolue** d'ajouter des fonctionnalités hors périmètre du SOW cible actif, de renommer des clés JSON existantes ou de casser les fonctionnalités validées dans les SOW précédents (notamment la télémétrie GPU/APU du SOW-01).
 
 ## 2. ÉTAT DE L'ART & SÉCURITÉ DU CODE (ZÉRO HARDCODE)
 1. **Zéro valeur ou chemin matériel codé en dur** :

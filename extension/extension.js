@@ -13,9 +13,14 @@ const STATE_FILE_PATH = '/tmp/tokenwatcher_state.json';
 function getModelAlias(rawName) {
     if (!rawName) return 'Standby';
     const lower = rawName.toLowerCase();
-    if (lower.includes('gemini-3.7') || lower.includes('gemini 3.7')) return 'Gemini 3.7 Flash';
-    if (lower.includes('gemini-3.6') || lower.includes('gemini 3.6')) return 'Gemini 3.6 Flash';
-    if (lower.includes('gemini-2.5') || lower.includes('gemini 2.5')) return 'Gemini 2.5 Flash';
+    if (lower.startsWith('gemini')) {
+        // Dynamic Title Case for Gemini models (preserve version numbers like 3.7, 3.8)
+        const parts = rawName.trim().split(/[-\s]+/).filter(Boolean);
+        return parts.map(p => {
+            if (/^\d+(\.\d+)?$/.test(p)) return p;
+            return p.charAt(0).toUpperCase() + p.slice(1).toLowerCase();
+        }).join(' ');
+    }
     if (lower.includes('qwen3-coder-30b') || lower.includes('qwen3-coder')) return 'Qwen3-Coder-30B';
     if (lower.includes('gemma-4-12b') || lower.includes('gemma 4 12b')) return 'Gemma-4-12B';
     if (lower.includes('gemma-4-31b') || lower.includes('gemma 4 31b')) return 'Gemma-4-31B';
@@ -24,10 +29,10 @@ function getModelAlias(rawName) {
     if (lower.includes('gpt-4o')) return 'GPT-4o';
 
     let clean = rawName.replace(/-GGUF$/i, '')
-                       .replace(/-Instruct$/i, '')
-                       .replace(/-it$/i, '')
-                       .replace(/:latest$/i, '')
-                       .replace(/-A3B/i, '');
+                        .replace(/-Instruct$/i, '')
+                        .replace(/-it$/i, '')
+                        .replace(/:latest$/i, '')
+                        .replace(/-A3B/i, '');
     return clean;
 }
 

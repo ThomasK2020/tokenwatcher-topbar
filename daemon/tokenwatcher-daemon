@@ -74,12 +74,22 @@ def clean_model_name(raw_name):
     if not raw_name:
         return "Standby"
     lower = str(raw_name).lower()
-    if "gemini-3.7" in lower or "gemini 3.7" in lower:
-        return "Gemini 3.7 Flash"
-    if "gemini-3.6" in lower or "gemini 3.6" in lower:
-        return "Gemini 3.6 Flash"
-    if "gemini-2.5" in lower or "gemini 2.5" in lower:
-        return "Gemini 2.5 Flash"
+    if lower.startswith("gemini"):
+        # Dynamic Title Case for Gemini models
+        # Preserve version numbers like 3.7, 3.8 as single tokens
+        import re
+        parts = re.split(r'([.-])', raw_name)
+        cleaned_parts = []
+        for part in parts:
+            if part in [".", "-"]:
+                cleaned_parts.append(part)
+            elif part.replace(".", "").isdigit():
+                cleaned_parts.append(part)
+            else:
+                cleaned_parts.append(part.capitalize())
+        result = "".join(cleaned_parts).replace(" ", "")
+        # Replace hyphens with spaces for final output
+        return result.replace("-", " ")
     if "qwen3-coder-30b" in lower or "qwen3-coder" in lower:
         return "Qwen3-Coder-30B"
     if "gemma-4-12b" in lower or "gemma 4 12b" in lower:
@@ -140,57 +150,65 @@ def get_best_webui_db_path():
 
 
 def fetch_metrics_hermes():
-    if not os.path.exists(HERMES_DB_PATH):
-        return None
+    # Find all Hermes DBs (root + profiles)
+    hermes_db_paths = []
+    if os.path.exists(HERMES_DB_PATH):
+        hermes_db_paths.append(HERMES_DB_PATH)
+    profile_pattern = os.path.expanduser("~/.hermes/profiles/*/state.db")
+    for path in glob.glob(profile_pattern):
+        if os.path.exists(path):
+            hermes_db_paths.append(path)
 
-    try:
-        conn = sqlite3.connect(f"file:{HERMES_DB_PATH}?mode=ro", uri=True)
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT id, title, model, last_activity_at, started_at, input_tokens, output_tokens, reasoning_tokens, tool_call_count, cwd
-            FROM sessions
-            WHERE archived = 0 AND hidden = 0
-            ORDER BY COALESCE(last_activity_at, started_at) DESC
-            LIMIT 1;
-        """)
-        row = cur.fetchone()
-        conn.close()
+    best_session = None
+    best_activity = -1.0
 
-        if not row:
-            return None
+    for db_path in hermes_db_paths:
+        try:
+            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT id, title, model, last_activity_at, started_at, input_tokens, output_tokens, reasoning_tokens, tool_call_count, cwd
+                FROM sessions
+                WHERE archived = 0 AND hidden = 0
+                ORDER BY COALESCE(last_activity_at, started_at) DESC
+                LIMIT 1;
+            """)
+            row = cur.fetchone()
+            conn.close()
 
-        session_id, title, model, last_activity, started_at, in_tok, out_tok, reason_tok, tool_count, cwd = row
-        
-        model_name = clean_model_name(model or "Hermes")
-        prompt_tokens = in_tok or 0
-        completion_tokens = out_tok or 0
-        reasoning_tokens = reason_tok or 0
-        total_tokens = prompt_tokens + completion_tokens + reasoning_tokens
-        activity_ts = float(last_activity or started_at or time.time())
+            if not row:
+                continue
 
-        return {
-            "source": "hermes",
-            "source_label": "Hermes Agent",
-            "status": "online",
-            "method": "sqlite",
-            "session_id": session_id,
-            "chat_title": title or "Hermes Task",
-            "directory": cwd or os.path.expanduser("~"),
-            "agent_mode": "agent",
-            "model": model_name,
-            "raw_model": model,
-            "prompt_tokens": prompt_tokens,
-            "completion_tokens": completion_tokens,
-            "reasoning_tokens": reasoning_tokens,
-            "total_tokens": total_tokens,
-            "tool_calls": tool_count or 0,
-            "tokens_per_sec": 0.0,
-            "prompt_per_sec": 0.0,
-            "updated_at": activity_ts
-        }
-    except Exception as e:
-        print(f"[TokenWatcher] Hermes fetch error: {e}", file=sys.stderr)
-        return None
+            session_id, title, model, last_activity, started_at, in_tok, out_tok, reason_tok, tool_count, cwd = row
+            activity_ts = float(last_activity or started_at or time.time())
+            
+            if activity_ts > best_activity:
+                best_activity = activity_ts
+                best_session = {
+                    "source": "hermes",
+                    "source_label": "Hermes Agent",
+                    "status": "online",
+                    "method": "sqlite",
+                    "session_id": session_id,
+                    "chat_title": title or "Hermes Task",
+                    "directory": cwd or os.path.expanduser("~"),
+                    "agent_mode": "agent",
+                    "model": clean_model_name(model or "Hermes"),
+                    "raw_model": model,
+                    "prompt_tokens": in_tok or 0,
+                    "completion_tokens": out_tok or 0,
+                    "reasoning_tokens": reason_tok or 0,
+                    "total_tokens": (in_tok or 0) + (out_tok or 0) + (reason_tok or 0),
+                    "tool_calls": tool_count or 0,
+                    "tokens_per_sec": 0.0,
+                    "prompt_per_sec": 0.0,
+                    "updated_at": activity_ts
+                }
+        except Exception as e:
+            print(f"[TokenWatcher] Hermes DB fetch error: {e}", file=sys.stderr)
+            continue
+
+    return best_session
 
 
 def fetch_metrics_openwebui(config):
@@ -346,9 +364,11 @@ def fetch_metrics_opencode():
             try:
                 pdata = json.loads(prow[0])
                 toks = pdata.get("tokens", {})
-                prompt_tokens = toks.get("input", 0)
-                completion_tokens = toks.get("output", 0)
-                reasoning_tokens = toks.get("reasoning", 0)
+                cache_obj = toks.get("cache", {}) if isinstance(toks.get("cache"), dict) else {}
+                cache_tokens = (cache_obj.get("read", 0) or 0) + (cache_obj.get("write", 0) or 0)
+                prompt_tokens = (toks.get("input", 0) or 0) + cache_tokens
+                completion_tokens = toks.get("output", 0) or 0
+                reasoning_tokens = toks.get("reasoning", 0) or 0
                 total_tokens = toks.get("total", prompt_tokens + completion_tokens + reasoning_tokens)
             except Exception:
                 pass
@@ -364,9 +384,11 @@ def fetch_metrics_opencode():
                 try:
                     pdata = json.loads(fallback_row[0])
                     toks = pdata.get("tokens", {})
-                    prompt_tokens = toks.get("input", 0)
-                    completion_tokens = toks.get("output", 0)
-                    reasoning_tokens = toks.get("reasoning", 0)
+                    cache_obj = toks.get("cache", {}) if isinstance(toks.get("cache"), dict) else {}
+                    cache_tokens = (cache_obj.get("read", 0) or 0) + (cache_obj.get("write", 0) or 0)
+                    prompt_tokens = (toks.get("input", 0) or 0) + cache_tokens
+                    completion_tokens = toks.get("output", 0) or 0
+                    reasoning_tokens = toks.get("reasoning", 0) or 0
                     total_tokens = toks.get("total", prompt_tokens + completion_tokens + reasoning_tokens)
                 except Exception:
                     pass
