@@ -1,20 +1,20 @@
 # TokenWatcher TopBar — Installation & Setup Guide
 
-This guide provides step-by-step instructions to install, configure, verify, and troubleshoot **TokenWatcher TopBar** on GNOME Shell (versions 45 through 50+ on both Wayland and X11).
+This guide provides step-by-step instructions to install, configure, verify, and develop **TokenWatcher TopBar** on GNOME Shell (versions 45 through 50+ on both Wayland and X11).
 
 ---
 
 ## 📋 System Requirements
 
 - **Desktop Environment:** GNOME Shell 45, 46, 47, 48, 49, 50 or 50.1 (Wayland or X11)
-- **Python:** Python 3.10+ (Standard library with SQLite3)
+- **Python:** Python 3.11+ (Standard library with SQLite3 & `pathlib`)
 - **Supported AI Sources (Auto-detected):**
-  - **Hermes Agent** (`~/.hermes/state.db`)
-  - **OpenCode** (`~/.local/share/opencode/opencode.db`)
+  - **Hermes Agent** (`~/.hermes/profiles/*/state.db` and `~/.hermes/state.db`)
+  - **OpenCode** (`~/.local/share/opencode/opencode.db` with KV cache token accounting)
   - **Open WebUI** (Local SQLite `webui.db` / port 8080)
   - **Lemonade Server** (Local REST API / port 13305)
-- **Hardware Acceleration (Optional):**
-  - AMD Radeon GPU / Strix Halo APU (uses `amdgpu_top` / sysfs for real-time VRAM allocation tracking)
+- **Hardware Telemetry (Zero-Hardcode Dynamic Discovery):**
+  - AMD Radeon GPU / Strix Halo APU (`gfx1151` Radeon 8060S): automatic discovery of DRM VRAM/Load, `amdgpu` Edge temperature, GFX power (`W`), GPU clock (`MHz`), and `k10temp`/`zenpower` SoC `Tctl` temperature via cached `sysfs`/`hwmon` paths (with `sensors -j` and `amdgpu_top --dump -J` fallbacks).
 
 ---
 
@@ -35,13 +35,11 @@ cd tokenwatcher-topbar
 4. Enables the GNOME Shell extension.
 
 > **Important Note for Wayland Users:**  
-> When installing for the first time, GNOME Shell needs to load the new JS module. Please **Log Out** and **Log Back In** to your desktop session (`System Menu` $\rightarrow$ `Log Out`).
+> When installing or updating `extension.js` / `stylesheet.css`, GNOME Shell caches ES6 modules in memory. Please **Log Out** and **Log Back In** to your desktop session (`gnome-session-quit --logout --no-prompt`) to reload the UI module.
 
 ---
 
 ## 🛠️ Option 2: Manual Installation Step-by-Step
-
-If you prefer deploying components manually without the script:
 
 ### Step 1: Install the GNOME Shell Extension
 ```bash
@@ -74,9 +72,9 @@ systemctl --user enable --now tokenwatcher.service
 systemctl --user status tokenwatcher.service
 ```
 
-### 2. Inspect Real-Time IPC Output
+### 2. Inspect Real-Time IPC Output (Including Thermal Telemetry)
 ```bash
-cat /tmp/tokenwatcher_state.json | jq .
+cat /tmp/tokenwatcher_state.json | python3 -m json.tool
 ```
 
 ### 3. Check GNOME Extension State
@@ -91,22 +89,18 @@ journalctl --user -u tokenwatcher.service -f
 
 ---
 
-## 🧪 Testing OpenCode & Live Resource Tracking
+## 🧪 Spec-Driven Development with OpenCode
 
-To see the TopBar automatically switch to OpenCode and track tokens/s, VRAM, and model usage in real time, run a prompt using your local Lemonade model:
+To execute a Statement of Work (SOW) specification in `SOW/specs/` using OpenCode (`Qwen3-Coder-30B-A3B-Instruct-GGUF`):
 
 ```bash
-opencode run -m lemonade/Qwen3-Coder-30B-A3B-Instruct-GGUF "Generate a quicksort implementation in Python with unit tests"
+./run_sow_topbar.sh SOW/specs/01_GPU_TEMP_TELEMETRY.md
+./run_sow_topbar.sh SOW/specs/02_HERMES_PROFILES_AND_MODELS.md
 ```
-
-* **TopBar indicator format:** `[Terminal] Qwen3-Coder-30B | 0,05M | 28,4 t/s | VRAM 14,4 Go | OpenCode`
-* Click on the indicator to open the interactive popover with detailed token breakdown (`Prompt in`, `Completion out`, total, GPU usage).
 
 ---
 
 ## 🗑️ Clean Uninstallation
-
-To completely remove TokenWatcher from your system:
 
 ```bash
 cd tokenwatcher-topbar
